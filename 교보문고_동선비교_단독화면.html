@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>교보문고 매장 동선 비교 (Before ↔ After 자동재생)</title>
+<style>
+    body {
+        font-family: 'Malgun Gothic', sans-serif;
+        background-color: #f4f6f9;
+        margin: 0;
+        padding: 30px;
+    }
+    .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        background: #ffffff;
+        padding: 30px;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+        color: #004085;
+        text-align: center;
+        font-size: 22px;
+        margin-bottom: 6px;
+    }
+    p.desc {
+        font-size: 13.5px;
+        color: #333;
+        line-height: 1.7;
+        margin: 0 0 18px;
+    }
+    .btn-group {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 18px;
+        flex-wrap: wrap;
+    }
+    .btn {
+        border: none;
+        color: #fff;
+        padding: 10px 18px;
+        font-size: 14px;
+        font-weight: bold;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+    .btn.start { background-color: #004085; }
+    .btn.start:hover { background-color: #002752; }
+    .btn.stop  { background-color: #856404; }
+    .btn.stop:hover  { background-color: #6b5003; }
+
+    /* -----------------------------------------------------------------
+       핵심 레이아웃: 두 지도를 "항상 좌/우로" 나란히 보여주는 grid.
+       floor-plan-layout(flex-wrap) 방식과 달리, 화면이 좁아져도 아래로
+       줄바꿈되지 않고 grid-template-columns: 1fr 1fr 를 그대로 유지합니다.
+       (아주 좁은 모바일 화면에서만 예외적으로 세로 1열로 전환합니다)
+       ----------------------------------------------------------------- */
+    .compare-side-by-side {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        align-items: start;
+    }
+    .compare-col { min-width: 0; }
+
+    .floor-plan-viewer {
+        background: #ffffff;
+        border: 2px dashed #004085;
+        padding: 15px;
+        border-radius: 8px;
+    }
+    .canvas-container {
+        position: relative;
+        text-align: center;
+        margin-top: 10px;
+    }
+    canvas {
+        background: #cbd5e1;
+        border: 2px solid #475569;
+        border-radius: 6px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        max-width: 100%;   /* 칸이 좁아지면 그림이 통째로 축소됨 */
+    }
+    .status {
+        margin-top: 10px;
+        font-size: 11.5px;
+        font-weight: bold;
+        line-height: 1.6;
+    }
+
+    @media (max-width: 560px) {
+        .compare-side-by-side { grid-template-columns: 1fr; }
+    }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>🆚 여러 직원 동선 비교 (Before ↔ After 동시 자동재생)</h1>
+    <p class="desc">
+        아래 두 지도에는 서로 다른 업무를 맡은 <strong>3명의 직원</strong>
+        (🧑 안내 담당, 📦 바로드림 전담, 📚 도서 진열 담당)이 동시에 등장합니다.
+        왼쪽(기본 매장)에서는 세 사람의 동선이 매장을 가로지르며 서로 얽히고 멀리 돌아가지만,
+        오른쪽(최적화 매장)에서는 바로드림 코너가 소설(J구역) 바로 옆으로 옮겨져
+        동선이 훨씬 짧고 간결해집니다.
+    </p>
+
+    <div class="btn-group">
+        <button type="button" class="btn start" onclick="startCompareAutoPlay()">▶ 자동 재생 시작</button>
+        <button type="button" class="btn stop" onclick="stopCompareAutoPlay()">⏹ 정지</button>
+    </div>
+
+    <div class="compare-side-by-side">
+        <div class="compare-col">
+            <div class="floor-plan-viewer">
+                <strong style="font-size:13px; color:#dc3545;">🔴 기본 매장(Before) - 동선이 얽힘</strong>
+                <div class="canvas-container">
+                    <canvas id="canvasBefore" width="560" height="560"></canvas>
+                </div>
+                <div id="routeDescBefore" class="status" style="color:#721c24;">상태: 대기 중</div>
+            </div>
+        </div>
+        <div class="compare-col">
+            <div class="floor-plan-viewer" style="border-color:#28a745;">
+                <strong style="font-size:13px; color:#28a745;">🟢 최적화 매장(After) - 동선이 짧고 간결함</strong>
+                <div class="canvas-container">
+                    <canvas id="canvasAfter" width="560" height="560"></canvas>
+                </div>
+                <div id="routeDescAfter" class="status" style="color:#155724;">상태: 대기 중</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // =====================================================================
+    // 1) 매장 배치 데이터 (책장/코너 좌표)
+    // =====================================================================
+    // 초보자를 위한 설명:
+    //  - 아래 배열들은 지도(canvas) 위에 그려질 "책장/코너 하나하나"의
+    //    위치(x, y)와 크기(w, h), 이름(name)을 담고 있습니다.
+    //  - commonShelves는 before(기본)/after(최적화) 두 매장 모두에 공통으로
+    //    존재하는 책장이고, beforeShelves/afterShelves는 여기에 각 매장만의
+    //    고유한 책장(바로드림, 소설 코너 등)을 더한 것입니다.
+    const commonShelves = [
+        {x: 30, y: 30, w: 250, h: 40, name: "HOTTRACKS", bg: "#f1f5f9"},
+        {x: 310, y: 30, w: 220, h: 40, name: "H-Kitchen", bg: "#f1f5f9"},
+
+        {x: 30, y: 110, w: 80, h: 40, name: "A구역(잡지)", bg: "#ffffff"},
+        {x: 30, y: 170, w: 80, h: 40, name: "A구역(만화)", bg: "#ffffff"},
+        {x: 30, y: 230, w: 80, h: 40, name: "A구역(건강)", bg: "#ffffff"},
+
+        {x: 30, y: 310, w: 80, h: 45, name: "B구역(미술)", bg: "#ffffff"},
+        {x: 30, y: 375, w: 80, h: 45, name: "B구역(여행)", bg: "#ffffff"},
+        {x: 30, y: 440, w: 140, h: 45, name: "C구역(아동/완구)", bg: "#ffffff"},
+
+        {x: 190, y: 490, w: 340, h: 40, name: "D/E출입구 (메인 복도)", bg: "#f1f5f9"}
+    ];
+
+    // before(기본 배치): 바로드림 코너가 매장 맨 위(입구 근처)에 소설 코너와
+    // 떨어져서 따로 배치되어 있습니다.
+    const beforeShelves = [
+        ...commonShelves,
+        {x: 130, y: 110, w: 60, h: 40, name: "바로드림", bg: "#d1ecf1", color: "#0c5460"},
+        {x: 210, y: 110, w: 80, h: 80, name: "J구역(소설)", bg: "#f8d7da", color: "#721c24", border: "#dc3545"},
+        {x: 210, y: 210, w: 80, h: 80, name: "K구역(인문)", bg: "#ffffff"},
+        {x: 210, y: 310, w: 80, h: 80, name: "H구역(경제)", bg: "#ffffff"},
+        {x: 210, y: 410, w: 80, h: 65, name: "안내/계산대", bg: "#fff3cd", color: "#856404"},
+
+        {x: 310, y: 110, w: 220, h: 50, name: "L구역(학습)", bg: "#ffffff"},
+        {x: 310, y: 175, w: 220, h: 50, name: "I구역(과학)", bg: "#ffffff"},
+        {x: 310, y: 240, w: 220, h: 50, name: "H구역(사회)", bg: "#ffffff"},
+        {x: 310, y: 305, w: 220, h: 50, name: "G구역(외국어)", bg: "#ffffff"},
+        {x: 310, y: 370, w: 220, h: 105, name: "F구역(Foreign)", bg: "#ffffff"}
+    ];
+
+    // after(최적화 배치): 바로드림 코너를 소설(J구역) 바로 왼쪽에 붙여
+    // 배치했습니다. 두 코너가 나란히 붙어 있으면 동선(이동 거리)이 크게
+    // 줄어듭니다.
+    const afterShelves = [
+        ...commonShelves,
+        {x: 125, y: 310, w: 80, h: 80, name: "바로드림(온라인 수령)", bg: "#d1ecf1", color: "#0c5460", border: "#0c5460"},
+        {x: 210, y: 110, w: 80, h: 80, name: "K구역(인문)", bg: "#ffffff"},
+        {x: 210, y: 210, w: 80, h: 80, name: "H구역(경제)", bg: "#ffffff"},
+        {x: 210, y: 310, w: 80, h: 80, name: "J구역(전진배치)", bg: "#d4edda", color: "#155724", border: "#28a745"},
+        {x: 210, y: 410, w: 80, h: 65, name: "안내/계산대", bg: "#fff3cd", color: "#856404"},
+
+        {x: 310, y: 110, w: 220, h: 50, name: "L구역(학습)", bg: "#ffffff"},
+        {x: 310, y: 175, w: 220, h: 50, name: "I구역(과학)", bg: "#ffffff"},
+        {x: 310, y: 240, w: 220, h: 50, name: "H구역(사회)", bg: "#ffffff"},
+        {x: 310, y: 305, w: 220, h: 50, name: "G구역(외국어)", bg: "#ffffff"},
+        {x: 310, y: 370, w: 220, h: 105, name: "F구역(Foreign)", bg: "#ffffff"}
+    ];
+
+    // after 매장에만 필요한 보완 표시(대기선/표지판/혼잡 주의 구역).
+    // 실제 책장이 아니라 "그림만 그려주는" 장식 데이터이므로 길찾기에는
+    // 영향을 주지 않습니다.
+    const afterDecorations = [
+        { type: 'zone', x: 118, y: 298, w: 182, h: 104,
+          fill: 'rgba(255, 193, 7, 0.20)', stroke: '#ffc107', label: '⚠️ 혼잡 주의 구역' },
+        { type: 'queueLine', points: [ {x: 150, y: 392}, {x: 150, y: 432} ],
+          color: '#0c5460', label: '🚶 대기선(여기서 줄 서세요)' },
+        { type: 'sign', x: 205, y: 350, icon: '🪧', text: '경계 안내판' }
+    ];
+    const beforeDecorations = []; // 기본 매장에는 별도 장식이 필요 없음
+
+    // =====================================================================
+    // 2) 격자 기반 통로 길찾기 엔진 (BFS)
+    // =====================================================================
+    // 초보자를 위한 설명:
+    //  - 지도를 4px 크기의 작은 정사각형(격자, grid)들로 잘게 나눈 뒤,
+    //    "책장 위(막힘)"와 "통로(빈 공간)"를 구분해 표시합니다.
+    //  - 직원이 목적지로 이동할 때는, 이 격자 위에서 BFS(너비 우선 탐색)
+    //    알고리즘으로 "책장을 피해서 갈 수 있는 가장 짧은 길"을 계산합니다.
+    const CANVAS_SIZE = 560;
+    const CELL = 4;
+    const INFLATE = 5;
+    const COLS = Math.floor(CANVAS_SIZE / CELL);
+    const ROWS = Math.floor(CANVAS_SIZE / CELL);
+
+    function isBlockedPoint(px, py, obstacles) {
+        if (px < 2 || py < 2 || px > CANVAS_SIZE - 2 || py > CANVAS_SIZE - 2) return true;
+        for (const o of obstacles) {
+            if (px >= o.x - INFLATE && px <= o.x + o.w + INFLATE &&
+                py >= o.y - INFLATE && py <= o.y + o.h + INFLATE) return true;
+        }
+        return false;
+    }
+
+    function buildGrid(obstacles) {
+        const grid = [];
+        for (let r = 0; r < ROWS; r++) {
+            const row = new Array(COLS);
+            const py = r * CELL + CELL / 2;
+            for (let c = 0; c < COLS; c++) {
+                const px = c * CELL + CELL / 2;
+                row[c] = isBlockedPoint(px, py, obstacles);
+            }
+            grid.push(row);
+        }
+        return grid;
+    }
+
+    function toCell(px, py) {
+        return { c: Math.min(COLS - 1, Math.max(0, Math.floor(px / CELL))),
+                 r: Math.min(ROWS - 1, Math.max(0, Math.floor(py / CELL))) };
+    }
+    function toPixel(c, r) {
+        return { x: c * CELL + CELL / 2, y: r * CELL + CELL / 2 };
+    }
+
+    function findNearestFree(grid, c, r) {
+        if (!grid[r][c]) return { c, r };
+        const seen = new Set([c + '_' + r]);
+        const queue = [{ c, r }];
+        let qi = 0;
+        while (qi < queue.length) {
+            const cur = queue[qi++];
+            for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const nc = cur.c + dc, nr = cur.r + dr;
+                if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue;
+                const k = nc + '_' + nr;
+                if (seen.has(k)) continue;
+                seen.add(k);
+                if (!grid[nr][nc]) return { c: nc, r: nr };
+                queue.push({ c: nc, r: nr });
+            }
+        }
+        return { c, r };
+    }
+
+    // BFS: 8방향 이동, 대각선 이동 시 모서리에 스치는 것(코너 컷팅) 방지
+    function bfsPath(grid, start, goal) {
+        if (grid[start.r][start.c]) start = findNearestFree(grid, start.c, start.r);
+        if (grid[goal.r][goal.c]) goal = findNearestFree(grid, goal.c, goal.r);
+
+        const key = (c, r) => c + '_' + r;
+        const startKey = key(start.c, start.r);
+        const goalKey = key(goal.c, goal.r);
+        if (startKey === goalKey) return [start];
+
+        const nodes = { [startKey]: start };
+        const cameFrom = {};
+        const visited = new Set([startKey]);
+        const queue = [start];
+        const dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+        let qi = 0;
+
+        while (qi < queue.length) {
+            const cur = queue[qi++];
+            const curKey = key(cur.c, cur.r);
+            if (curKey === goalKey) break;
+            for (const [dc, dr] of dirs) {
+                const nc = cur.c + dc, nr = cur.r + dr;
+                if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue;
+                if (grid[nr][nc]) continue;
+                if (dc !== 0 && dr !== 0 && (grid[cur.r][nc] || grid[nr][cur.c])) continue; // 코너 컷팅 방지
+                const nk = key(nc, nr);
+                if (visited.has(nk)) continue;
+                visited.add(nk);
+                cameFrom[nk] = curKey;
+                nodes[nk] = { c: nc, r: nr };
+                queue.push(nodes[nk]);
+            }
+        }
+        if (!visited.has(goalKey)) return null;
+
+        const path = [];
+        let ck = goalKey;
+        while (ck !== startKey) {
+            path.push(nodes[ck]);
+            ck = cameFrom[ck];
+        }
+        path.push(nodes[startKey]);
+        path.reverse();
+        return path;
+    }
+
+    function hasLineOfSight(grid, p1, p2) {
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        const steps = Math.max(1, Math.ceil(dist / (CELL / 2)));
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const x = p1.x + (p2.x - p1.x) * t;
+            const y = p1.y + (p2.y - p1.y) * t;
+            const c = Math.floor(x / CELL), r = Math.floor(y / CELL);
+            if (r < 0 || c < 0 || r >= ROWS || c >= COLS || grid[r][c]) return false;
+        }
+        return true;
+    }
+
+    // 격자 경로를 통로 안에서 최대한 잘라내며 자연스럽게 단순화(string-pulling)
+    function smoothPath(grid, points) {
+        if (points.length <= 2) return points;
+        const result = [points[0]];
+        let i = 0;
+        while (i < points.length - 1) {
+            let j = points.length - 1;
+            while (j > i + 1 && !hasLineOfSight(grid, points[i], points[j])) j--;
+            result.push(points[j]);
+            i = j;
+        }
+        return result;
+    }
+
+    // =====================================================================
+    // 3) 다중 직원(캐릭터) 정의
+    // =====================================================================
+    // 초보자를 위한 설명:
+    //  - 직원 1명이 아니라, 서로 다른 업무를 맡은 여러 명을 "객체 배열"로
+    //    표현합니다. 직원 한 명은 다음 속성을 가진 객체입니다.
+    //      id       : 코드에서 이 직원을 찾을 때 쓰는 고유 이름표
+    //      roleName : 캐릭터 아래에 표시할 짧은 역할 이름
+    //      icon     : 캐릭터 원 안에 그릴 이모지
+    //      color    : 캐릭터 원의 색상
+    //      pos      : 현재 위치 {x, y} (이동 중 계속 갱신됨)
+    //      tasks    : 자동 순찰 시 순서대로 방문할 목적지 목록
+    //  - before/after는 책장 좌표가 다르므로, layout 값에 따라 좌표가
+    //    다른 직원 배열을 만들어주는 함수입니다.
+    const CHECKOUT_POINT = { x: 250, y: 486 };
+
+    function makeWorkerRoster(layout) {
+        if (layout === 'before') {
+            return [
+                // 🧑 안내 담당: 손님에게 소설 코너 위치를 안내하고 계산대로 복귀
+                {
+                    id: 'guide', roleName: '안내', icon: '🧑', color: '#dc3545',
+                    pos: { x: CHECKOUT_POINT.x, y: CHECKOUT_POINT.y },
+                    tasks: [
+                        { point: { x: 250, y: 200 }, label: 'J구역(소설) 앞 통로' },
+                        { point: CHECKOUT_POINT,     label: '계산대 복귀' }
+                    ]
+                },
+                // 📦 바로드림 전담: 코너가 매장 맨 위 구석에 따로 있어 소설 코너·
+                //    계산대까지 매장을 세로로 길게 가로지르는 먼 거리를 걷습니다.
+                {
+                    id: 'pickup', roleName: '바로드림', icon: '📦', color: '#0d6efd',
+                    pos: { x: 160, y: 130 },
+                    tasks: [
+                        { point: { x: 160, y: 130 }, label: '바로드림 코너(입구 쪽, 외따로 위치)' },
+                        { point: { x: 250, y: 150 }, label: 'J구역(소설) - 멀리 떨어져 있음' },
+                        { point: CHECKOUT_POINT,     label: '계산대 - 매장을 세로로 종단' },
+                        { point: { x: 160, y: 130 }, label: '바로드림 코너로 복귀' }
+                    ]
+                },
+                // 📚 도서 진열 담당: 매장을 대각선으로 가로지르는 업무. before에서는
+                //    바로드림 직원의 '세로 종단' 경로와 자주 겹쳐 동선이 얽힙니다.
+                {
+                    id: 'stock', roleName: '진열', icon: '📚', color: '#fd7e14',
+                    pos: { x: 70, y: 190 },
+                    tasks: [
+                        { point: { x: 70, y: 190 },  label: 'A구역(만화) 진열대' },
+                        { point: { x: 420, y: 420 }, label: 'F구역(Foreign) 진열대' },
+                        { point: { x: 70, y: 190 },  label: 'A구역(만화)으로 복귀' }
+                    ]
+                }
+            ];
+        }
+        // layout === 'after' : 최적화된 매장 배치
+        return [
+            {
+                id: 'guide', roleName: '안내', icon: '🧑', color: '#28a745',
+                pos: { x: CHECKOUT_POINT.x, y: CHECKOUT_POINT.y },
+                tasks: [
+                    { point: { x: 250, y: 300 }, label: 'J구역(전진배치) 앞 통로' },
+                    { point: CHECKOUT_POINT,     label: '계산대 복귀' }
+                ]
+            },
+            // 📦 바로드림 전담: after에서는 코너가 J구역 바로 옆으로 옮겨져
+            //    같은 업무를 훨씬 짧은 동선으로 처리합니다.
+            {
+                id: 'pickup', roleName: '바로드림', icon: '📦', color: '#0d6efd',
+                pos: { x: 165, y: 350 },
+                tasks: [
+                    { point: { x: 165, y: 350 }, label: '바로드림 코너' },
+                    { point: { x: 250, y: 350 }, label: 'J구역 - 바로 옆이라 단 몇 걸음' },
+                    { point: CHECKOUT_POINT,     label: '계산대 - 지척 거리' },
+                    { point: { x: 165, y: 350 }, label: '바로드림 코너로 복귀' }
+                ]
+            },
+            {
+                id: 'stock', roleName: '진열', icon: '📚', color: '#fd7e14',
+                pos: { x: 70, y: 190 },
+                tasks: [
+                    { point: { x: 70, y: 190 },  label: 'A구역(만화) 진열대' },
+                    { point: { x: 420, y: 420 }, label: 'F구역(Foreign) 진열대' },
+                    { point: { x: 70, y: 190 },  label: 'A구역(만화)으로 복귀' }
+                ]
+            }
+        ];
+    }
+
+    // =====================================================================
+    // 4) 지도 인스턴스 상태 (before / after)
+    // =====================================================================
+    // 초보자를 위한 설명:
+    //  - state 객체는 왼쪽(before)·오른쪽(after) 두 지도 화면 각각의 현재
+    //    상태(책장 배치, 캔버스 id, 장식, 길찾기 격자, 직원 배열, 재생 여부)를
+    //    담습니다.
+    //  - workers 항목이 "직원 1명"이 아니라 "직원 여러 명(배열)"인 점이 핵심입니다.
+    //  - playing 항목은 자동 재생이 진행 중인지 나타내는 참/거짓 값입니다.
+    //    ⏹ 정지 버튼을 누르면 이 값을 false로 바꿔 반복을 멈춥니다.
+    const state = {
+        before: { shelves: beforeShelves, canvasId: 'canvasBefore', descId: 'routeDescBefore',
+                  decorations: beforeDecorations, grid: null,
+                  workers: makeWorkerRoster('before'), playing: false, statusMap: {} },
+        after:  { shelves: afterShelves,  canvasId: 'canvasAfter',  descId: 'routeDescAfter',
+                  decorations: afterDecorations,  grid: null,
+                  workers: makeWorkerRoster('after'), playing: false, statusMap: {} }
+    };
+
+    // =====================================================================
+    // 5) 그리기(rendering) 함수들
+    // =====================================================================
+
+    // 대기선 / 안내 표지판 / 혼잡 주의 구역처럼, 책장은 아니지만 안내에
+    // 도움이 되는 그림을 그려주는 함수입니다.
+    function drawDecoration(ctx, d) {
+        if (d.type === 'zone') {
+            ctx.save();
+            ctx.fillStyle = d.fill;
+            ctx.strokeStyle = d.stroke;
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 4]);
+            ctx.fillRect(d.x, d.y, d.w, d.h);
+            ctx.strokeRect(d.x, d.y, d.w, d.h);
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#7a5c00';
+            ctx.font = 'bold 10px "Malgun Gothic"';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(d.label, d.x + d.w / 2, d.y + 4);
+            ctx.restore();
+
+        } else if (d.type === 'queueLine') {
+            const [p1, p2] = d.points;
+            ctx.save();
+            ctx.strokeStyle = d.color;
+            ctx.lineWidth = 3;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+            const headLen = 8;
+            ctx.beginPath();
+            ctx.moveTo(p2.x, p2.y);
+            ctx.lineTo(p2.x - headLen * Math.cos(angle - Math.PI / 6), p2.y - headLen * Math.sin(angle - Math.PI / 6));
+            ctx.lineTo(p2.x - headLen * Math.cos(angle + Math.PI / 6), p2.y - headLen * Math.sin(angle + Math.PI / 6));
+            ctx.closePath();
+            ctx.fillStyle = d.color;
+            ctx.fill();
+
+            ctx.fillStyle = d.color;
+            ctx.font = 'bold 9px "Malgun Gothic"';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(d.label, p2.x + 6, (p1.y + p2.y) / 2);
+            ctx.restore();
+
+        } else if (d.type === 'sign') {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(d.x, d.y, 10, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = '#495057';
+            ctx.stroke();
+
+            ctx.font = '11px "Malgun Gothic"';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(d.icon, d.x, d.y);
+
+            ctx.fillStyle = '#495057';
+            ctx.font = 'bold 9px "Malgun Gothic"';
+            ctx.fillText(d.text, d.x, d.y + 16);
+            ctx.restore();
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // drawMap(canvasId, shelves, workers, decorations)
+    // -------------------------------------------------------------------
+    // 이 함수 하나가 지도 그림 전체를 담당합니다. 순서대로:
+    //   1) 배경(회색) 채우기      2) 옅은 격자선 그리기(통로 느낌)
+    //   3) 책장/코너들 그리기     4) 장식(대기선/표지판) 그리기
+    //   5) 직원 여러 명(workers 배열)을 순서대로 그리기
+    // workers는 "직원 객체들의 배열"입니다. 직원이 1명이어도 [직원1] 처럼
+    // 배열로 넘겨야 합니다.
+    function drawMap(canvasId, shelves, workers, decorations) {
+        const canvas = document.getElementById(canvasId);
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#cbd5e1';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < canvas.width; i += 25) {
+            ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke();
+        }
+
+        shelves.forEach(s => {
+            ctx.fillStyle = s.bg || '#ffffff';
+            ctx.strokeStyle = s.border || '#334155';
+            ctx.lineWidth = 1.5;
+            ctx.fillRect(s.x, s.y, s.w, s.h);
+            ctx.strokeRect(s.x, s.y, s.w, s.h);
+
+            ctx.fillStyle = s.color || '#1e293b';
+            ctx.font = 'bold 10px "Malgun Gothic"';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(s.name, s.x + s.w / 2, s.y + s.h / 2);
+        });
+
+        if (decorations && decorations.length > 0) {
+            decorations.forEach(d => drawDecoration(ctx, d));
+        }
+
+        // 여러 명의 직원을 forEach로 한 명씩 순서대로 그립니다.
+        // 이렇게 하면 직원이 1명이든 3명이든 같은 코드로 처리할 수 있습니다.
+        if (workers && workers.length > 0) {
+            workers.forEach(w => drawWorker(ctx, w));
+        }
+    }
+
+    // 직원 캐릭터 "한 명"을 그리는 함수 (원 + 이모지 + 역할 이름표)
+    function drawWorker(ctx, worker) {
+        ctx.beginPath();
+        ctx.arc(worker.pos.x, worker.pos.y, 11, 0, Math.PI * 2);
+        ctx.fillStyle = worker.color || '#dc3545';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 10px "Malgun Gothic"';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(worker.icon || '👤', worker.pos.x, worker.pos.y);
+
+        // 캐릭터 아래쪽에 역할 이름을 작게 표시해 여러 명을 구분합니다.
+        ctx.fillStyle = '#111827';
+        ctx.font = 'bold 8px "Malgun Gothic"';
+        ctx.fillText(worker.roleName || '', worker.pos.x, worker.pos.y + 15);
+    }
+
+    // 지도 인스턴스 하나를 현재 상태 그대로 다시 그립니다.
+    function renderInstance(key) {
+        const inst = state[key];
+        drawMap(inst.canvasId, inst.shelves, inst.workers, inst.decorations);
+    }
+
+    // 직원별 상태 메시지를 갱신합니다. 여러 명이 동시에 움직이므로,
+    // 각 직원의 최신 메시지를 한 줄씩 모아서 보여줍니다.
+    function setWorkerStatus(key, workerId, text) {
+        const inst = state[key];
+        const worker = inst.workers.find(w => w.id === workerId);
+        if (!worker) return;
+        inst.statusMap[workerId] = `${worker.icon} ${worker.roleName}: ${text}`;
+        const el = document.getElementById(inst.descId);
+        if (el) el.innerHTML = Object.values(inst.statusMap).join('<br>');
+    }
+
+    // =====================================================================
+    // 6) 이동 애니메이션 & 길찾기 실행
+    // =====================================================================
+
+    // -------------------------------------------------------------------
+    // animateWorkerAlong(key, workerId, path)
+    // -------------------------------------------------------------------
+    // 직원 "한 명"을 path(경유 좌표들)를 따라 부드럽게 이동시킵니다.
+    // 매 프레임마다 이 직원의 pos 값만 갱신하고, 화면은 renderInstance()로
+    // "그 인스턴스의 모든 직원"을 함께 다시 그립니다. 여러 직원이 각자
+    // 이 함수를 동시에 호출해도(=여러 requestAnimationFrame 체인이 동시에
+    // 돌아가도) 서로 다른 worker.pos 값을 독립적으로 갖고 있기 때문에
+    // 3명이 동시에 화면 위에서 각자 다른 방향으로 움직일 수 있습니다.
+    function animateWorkerAlong(key, workerId, path) {
+        const inst = state[key];
+        const worker = inst.workers.find(w => w.id === workerId);
+        return new Promise(resolve => {
+            let idx = 0;
+            function step() {
+                if (idx >= path.length - 1) {
+                    worker.pos = path[path.length - 1];
+                    renderInstance(key);
+                    resolve();
+                    return;
+                }
+                const start = path[idx], end = path[idx + 1];
+                const dist = Math.hypot(end.x - start.x, end.y - start.y);
+                const frames = Math.max(4, Math.round(dist / 4));
+                let f = 0;
+                function frame() {
+                    f++;
+                    const t = f / frames;
+                    worker.pos = { x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t };
+                    renderInstance(key);
+                    if (f < frames) requestAnimationFrame(frame);
+                    else { idx++; step(); }
+                }
+                frame();
+            }
+            step();
+        });
+    }
+
+    // 직원 한 명을 목표 지점(target)까지 BFS 길찾기로 이동시킵니다.
+    async function goTo(key, workerId, target, label) {
+        const inst = state[key];
+        const worker = inst.workers.find(w => w.id === workerId);
+        if (!worker) return;
+        const startCell = toCell(worker.pos.x, worker.pos.y);
+        const goalCell = toCell(target.x, target.y);
+        const rawPath = bfsPath(inst.grid, startCell, goalCell);
+        if (!rawPath) {
+            setWorkerStatus(key, workerId, `⚠️ ${label}까지 갈 수 있는 통로 경로를 찾지 못했습니다.`);
+            return;
+        }
+        const pixelPath = rawPath.map(c => toPixel(c.c, c.r));
+        pixelPath[0] = { x: worker.pos.x, y: worker.pos.y };
+        pixelPath[pixelPath.length - 1] = { x: target.x, y: target.y };
+        const smoothed = smoothPath(inst.grid, pixelPath);
+        setWorkerStatus(key, workerId, `이동 중 → ${label} (경유지 ${smoothed.length}개)`);
+        await animateWorkerAlong(key, workerId, smoothed);
+        setWorkerStatus(key, workerId, `✅ 도착: ${label}`);
+    }
+
+    // -------------------------------------------------------------------
+    // runWorkerRoute(key, workerId) / runAllWorkersOnce(key)
+    // -------------------------------------------------------------------
+    // runWorkerRoute: 직원 한 명의 tasks(순찰 경로)를 처음부터 끝까지 한 바퀴 실행.
+    // runAllWorkersOnce: 이 지도의 "모든" 직원의 runWorkerRoute를 Promise.all로
+    //   동시에 시작합니다. Promise.all은 배열 안의 여러 비동기 작업을 "동시에"
+    //   실행시키는 자바스크립트 기능이라서, 직원 3명이 실제로 같은 시간에
+    //   각자 다른 방향으로 움직입니다.
+    async function runWorkerRoute(key, workerId) {
+        const inst = state[key];
+        const worker = inst.workers.find(w => w.id === workerId);
+        if (!worker) return;
+        for (const t of worker.tasks) {
+            await goTo(key, workerId, t.point, t.label);
+        }
+    }
+
+    function runAllWorkersOnce(key) {
+        const inst = state[key];
+        return Promise.all(inst.workers.map(w => runWorkerRoute(key, w.id)));
+    }
+
+    // -------------------------------------------------------------------
+    // autoPlayInstance(key) / stopAutoPlay(key)
+    // -------------------------------------------------------------------
+    // "자동 재생"은 정지 버튼을 누르기 전까지 모든 직원의 순찰 경로를 계속
+    // 반복시키는 것입니다. inst.playing을 깃발(flag)처럼 사용해서, while문이
+    // 이 깃발을 계속 확인하다가 stopAutoPlay()가 false로 내리면 현재 한
+    // 바퀴를 끝낸 뒤 반복을 멈춥니다.
+    async function autoPlayInstance(key) {
+        const inst = state[key];
+        if (inst.playing) return; // 이미 재생 중이면 중복 실행 방지
+        inst.playing = true;
+        while (inst.playing) {
+            await runAllWorkersOnce(key);
+        }
+    }
+
+    function stopAutoPlay(key) {
+        state[key].playing = false;
+    }
+
+    // before/after 두 지도를 동시에 자동 재생시켜 두 매장의 동선 차이를
+    // 한 화면에서 나란히 비교할 수 있게 합니다.
+    function startCompareAutoPlay() {
+        autoPlayInstance('before');
+        autoPlayInstance('after');
+    }
+    function stopCompareAutoPlay() {
+        stopAutoPlay('before');
+        stopAutoPlay('after');
+    }
+
+    // =====================================================================
+    // 7) 초기화
+    // =====================================================================
+    window.onload = function () {
+        // 'D/E출입구 (메인 복도)'는 실제로는 걸어다닐 수 있는 통로이므로
+        // 길찾기용 장애물 목록에서는 제외합니다.
+        const beforeObstacles = beforeShelves.filter(s => s.name !== 'D/E출입구 (메인 복도)');
+        const afterObstacles = afterShelves.filter(s => s.name !== 'D/E출입구 (메인 복도)');
+        state.before.grid = buildGrid(beforeObstacles);
+        state.after.grid = buildGrid(afterObstacles);
+
+        renderInstance('before');
+        renderInstance('after');
+
+        // 페이지를 열면 곧바로 자동 재생을 시작합니다.
+        startCompareAutoPlay();
+    };
+</script>
+</body>
+</html>
